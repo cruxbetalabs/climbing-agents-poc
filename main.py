@@ -25,6 +25,7 @@ from agent.orchestrator import (
 )
 from db.schema import init_schema
 from db.seed import seed
+from memory import SqliteVecStore
 from tools import init_all_tools
 
 
@@ -35,6 +36,7 @@ from tools import init_all_tools
 STYLE = Style.from_dict(
     {
         "prompt": "bold #00aaff",
+        "confirm": "bold #ffaa00",
         "assistant": "#aaffaa",
         "tool-name": "bold #ffaa00",
         "tool-result": "#888888",
@@ -75,7 +77,13 @@ def print_tool_start(calls: list) -> None:
 def print_tool_done(calls, results):
     for tc, result in zip(calls, results):
         status_icon = (
-            "✓" if result.status == "ok" else ("∅" if result.status == "empty" else "✗")
+            "✓"
+            if result.status == "ok"
+            else (
+                "∅"
+                if result.status == "empty"
+                else "⚠" if result.status == "needs_confirmation" else "✗"
+            )
         )
         print(f"  \033[90m{status_icon}  {tc.name} → {result.status}\033[0m")
 
@@ -136,6 +144,19 @@ async def chat_loop(orchestrator: Orchestrator, db_path: str):
         style=STYLE,
     )
 
+    async def confirm_fn(message: str) -> bool:
+        """Ask the user to confirm a proposed mutation before it's committed."""
+        print(f"\n\033[93m  ⚠  {message}\033[0m")
+        with patch_stdout():
+            try:
+                answer = await prompt_session.prompt_async(
+                    HTML("<confirm>  confirm? [y/N] › </confirm> "),
+                    style=STYLE,
+                )
+            except (EOFError, KeyboardInterrupt):
+                return False
+        return answer.strip().lower() in ("y", "yes")
+
     print_header("╔══════════════════════════════════╗")
     print_header("║   Climbing Agents PoC  🧗         ║")
     print_header("╚══════════════════════════════════╝")
@@ -157,7 +178,12 @@ async def chat_loop(orchestrator: Orchestrator, db_path: str):
                     HTML("<prompt>you › </prompt> "),
                     style=STYLE,
                 )
-        except (EOFError, KeyboardInterrupt):
+        except KeyboardInterrupt:
+            # Ctrl+C — clear the current input and reprompt
+            print("\r\033[K", end="")  # clear the line in place
+            continue
+        except EOFError:
+            # Ctrl+D — quit
             print("\n\033[90mGoodbye. Keep sending it! 🏔\033[0m")
             break
 
@@ -175,7 +201,9 @@ async def chat_loop(orchestrator: Orchestrator, db_path: str):
 
         # Run orchestrator, consume events
         answer_content = None
-        async for event in orchestrator.run(user_input, session_history):
+        async for event in orchestrator.run(
+            user_input, session_history, confirm_fn=confirm_fn
+        ):
             if isinstance(event, ThinkingEvent):
                 print_thinking()
             elif isinstance(event, ToolStartEvent):
@@ -207,26 +235,76 @@ async def chat_loop(orchestrator: Orchestrator, db_path: str):
 
 
 # ─────────────────────────────────────────────
+# Vector store backfill
+# ─────────────────────────────────────────────
+
+
+async def _backfill_logs(vector_store, db_path: str) -> None:
+    """Upsert all existing climb logs into the vector store (idempotent)."""
+    from db.schema import get_connection
+
+    conn = get_connection(db_path)
+    rows = conn.execute("SELECT * FROM climb_logs").fetchall()
+    conn.close()
+    if not rows:
+        return
+
+    def _log_text(r) -> str:
+        parts = []
+        for f in ("grade", "style", "outcome"):
+            if r[f]:
+                parts.append(r[f])
+        if r["location"]:
+            parts.append(f"at {r['location']}")
+        if r["route_name"]:
+            parts.append(f'"{r["route_name"]}"')
+        if r["notes"]:
+            parts.append(f"— {r['notes']}")
+        return " ".join(parts) or "(no details)"
+
+    await vector_store.upsert(
+        ids=[r["id"] for r in rows],
+        texts=[_log_text(r) for r in rows],
+        metadata=[{"source": "climb_logs"}] * len(rows),
+    )
+    print(f"\033[90m[vector store] backfilled {len(rows)} climb log(s)\033[0m")
+
+
+# ─────────────────────────────────────────────
 # Entry point
 # ─────────────────────────────────────────────
 
 
-def main():
+async def _async_main() -> None:
     load_dotenv()
 
     cfg = load_config()
     db_path = cfg["db"]["path"]
 
-    # Init DB and tools
+    # Init DB
     init_schema(db_path)
     seed(db_path)  # no-op if already seeded
-    init_all_tools(db_path)
 
-    # Init LLM and orchestrator
+    # Init LLM client (shared for chat + embeddings)
     llm = LLMClient(cfg["llm"])
-    orc = Orchestrator(llm, cfg["agent"])
 
-    asyncio.run(chat_loop(orc, db_path))
+    # Init vector store
+    vector_store = SqliteVecStore(db_path, llm._client)
+
+    # Init tools — pass vector store for write-side upserts on create_log_entry
+    init_all_tools(db_path, vector_store=vector_store)
+
+    # Backfill any existing climb logs into the vector store
+    await _backfill_logs(vector_store, db_path)
+
+    # Init orchestrator with vector store for proactive context injection
+    orc = Orchestrator(llm, cfg["agent"], vector_store=vector_store)
+
+    await chat_loop(orc, db_path)
+
+
+def main():
+    asyncio.run(_async_main())
 
 
 if __name__ == "__main__":

@@ -6,6 +6,6 @@ from tools.registry import registry
 import tools.web_tools  # noqa: F401
 
 
-def init_all_tools(db_path: str) -> None:
-    init_db_tools(db_path)
+def init_all_tools(db_path: str, vector_store=None) -> None:
+    init_db_tools(db_path, vector_store=vector_store)
     init_profile_tools(db_path)

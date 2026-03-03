@@ -16,7 +16,7 @@ import asyncio
 import json
 import logging
 from datetime import date
-from typing import AsyncIterator
+from typing import AsyncIterator, Awaitable, Callable
 
 from agent.llm_client import LLMClient, LLMResponse, ToolCall
 from tools.registry import registry, ToolResult
@@ -35,6 +35,10 @@ and external climber databases. Use them as needed. When you have enough
 information, respond directly and concisely.
 
 Important rules:
+- ALWAYS use the appropriate tool to answer questions about climb logs, profile, or
+  external climbers — never answer from session history or memory, even if a similar
+  question was answered earlier in the conversation. The database is the source of
+  truth; prior answers in chat may be stale.
 - For any action that modifies data (update profile, create log), describe the
   change you're about to make and wait for the user to confirm before calling
   the mutating tool.
@@ -132,22 +136,40 @@ class ErrorEvent(OrchestratorEvent):
 
 
 class Orchestrator:
-    def __init__(self, llm: LLMClient, cfg: dict):
+    def __init__(self, llm: LLMClient, cfg: dict, vector_store=None):
         self.llm = llm
         self.max_steps: int = cfg.get("max_steps", 10)
         self.max_tool_calls: int = cfg.get("max_tool_calls", 20)
         self.parallel: bool = cfg.get("parallel_tools", True)
+        self.vector_store = vector_store
 
     async def run(
         self,
         user_message: str,
         session_history: list[dict],
+        confirm_fn: Callable[[str], Awaitable[bool]] | None = None,
     ) -> AsyncIterator[OrchestratorEvent]:
         """
         Async generator that yields OrchestratorEvents as the agent works.
         The UI consumes these to show thinking indicators, tool activity, and final answer.
+
+        confirm_fn: optional async callback used for needs_confirmation tool results.
+          Receives the human-readable summary string, returns True (proceed) or
+          False (cancel). The orchestrator pauses the loop until it resolves.
         """
-        messages = _build_messages(session_history, user_message)
+        # Proactive context: semantic search over past logs before the first LLM call
+        proactive_context: str | None = None
+        if self.vector_store is not None:
+            matches = await self.vector_store.search(user_message, top_k=5)
+            if matches:
+                lines = [
+                    f"- [{m.metadata.get('source', '?')}] {m.text}" for m in matches
+                ]
+                proactive_context = "\n".join(lines)
+
+        messages = _build_messages(
+            session_history, user_message, proactive_context=proactive_context
+        )
         call_log: list[tuple[str, str]] = []
         total_tool_calls = 0
 
@@ -198,13 +220,32 @@ class Orchestrator:
 
             # ── Execute tools: parallel or sequential ──
             if self.parallel and len(new_calls) > 1:
-                results = await asyncio.gather(
-                    *[registry.dispatch(tc.name, tc.arguments) for tc in new_calls]
+                results = list(
+                    await asyncio.gather(
+                        *[registry.dispatch(tc.name, tc.arguments) for tc in new_calls]
+                    )
                 )
             else:
                 results = []
                 for tc in new_calls:
                     results.append(await registry.dispatch(tc.name, tc.arguments))
+
+            # ── Handle needs_confirmation ──
+            for i, (tc, result) in enumerate(zip(new_calls, results)):
+                if result.status == "needs_confirmation":
+                    if confirm_fn is not None:
+                        confirmed = await confirm_fn(
+                            result.message or "Confirm action?"
+                        )
+                        if confirmed:
+                            results[i] = await registry.commit(tc.name, result.data)
+                        else:
+                            results[i] = ToolResult(
+                                data=None,
+                                status="error",
+                                message="Action cancelled by user.",
+                            )
+                    # if no confirm_fn, pass through as-is so the LLM sees the summary
 
             total_tool_calls += len(new_calls)
             for tc in new_calls:

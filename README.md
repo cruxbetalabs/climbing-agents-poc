@@ -143,3 +143,8 @@ Each message goes through a ReAct loop:
 3. Call `init_your_tools(db_path)` from `init_all_tools()` if it needs the DB path
 
 The orchestrator picks up new tools automatically via `registry.schemas`.
+
+## To-do
+
+- [ ] maintain a tool where it keeps a registry of a list of sources to find given a famous climber: climbing-history, IFSC climber's stats.
+- [ ] answer streaming
