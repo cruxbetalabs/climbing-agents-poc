@@ -1,0 +1,19 @@
+llm:
+  provider: openai              # openai | anthropic | ollama
+  model: gpt-4o-mini
+  temperature: 0.3
+  max_tokens: 2048
+  api_key_env: OPENAI_API_KEY   # reads from environment, never store key here
+  base_url: null                # null = default. for ollama: http://localhost:11434/v1
+
+agent:
+  max_steps: 10                 # hard iteration cap
+  max_tool_calls: 20            # total tool calls across all steps
+  parallel_tools: true          # run multiple tool_calls in one response concurrently
+
+db:
+  path: ./data/climbing.db      # SQLite file path
+
+app:
+  session_date_format: "%Y-%m-%d"
+  user_id: "local_user"         # single-user PoC
