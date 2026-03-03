@@ -146,5 +146,5 @@ The orchestrator picks up new tools automatically via `registry.schemas`.
 
 ## To-do
 
-- [ ] maintain a tool where it keeps a registry of a list of sources to find given a famous climber: climbing-history, IFSC climber's stats.
+- [ ] maintain a tool where it keeps a registry of a list of sources to find given a famous climber: climbing-history, IFSC climber's stats. Maybe use a web search API.
 - [ ] answer streaming

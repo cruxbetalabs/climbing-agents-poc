@@ -173,7 +173,7 @@ class Orchestrator:
         call_log: list[tuple[str, str]] = []
         total_tool_calls = 0
 
-        for step in range(self.max_steps):
+        for _ in range(self.max_steps):
             yield ThinkingEvent()
 
             # Inject budget hint when getting close
