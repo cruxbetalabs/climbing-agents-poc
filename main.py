@@ -64,10 +64,12 @@ def print_assistant(text: str):
     print(f"\033[92m{text}\033[0m")
 
 
-def print_tool_start(names: list[str]):
-    mode = "parallel" if len(names) > 1 else "sequential"
-    label = ", ".join(f"\033[93m{n}\033[0m" for n in names)
-    print(f"  \033[90m⚙  calling [{label}\033[90m] ({mode})\033[0m")
+def print_tool_start(calls: list) -> None:
+    mode = "parallel" if len(calls) > 1 else "sequential"
+    print(f"  \033[90m⚙  [{mode}]\033[0m")
+    for tc in calls:
+        args_str = ", ".join(f"{k}={v!r}" for k, v in tc.arguments.items())
+        print(f"  \033[90m   \033[93m{tc.name}\033[90m({args_str})\033[0m")
 
 
 def print_tool_done(calls, results):
@@ -178,7 +180,7 @@ async def chat_loop(orchestrator: Orchestrator, db_path: str):
                 print_thinking()
             elif isinstance(event, ToolStartEvent):
                 print("  " + " " * 12, end="\r")  # clear "thinking" line
-                print_tool_start([tc.name for tc in event.calls])
+                print_tool_start(event.calls)
             elif isinstance(event, ToolDoneEvent):
                 print_tool_done(event.calls, event.results)
             elif isinstance(event, AnswerEvent):

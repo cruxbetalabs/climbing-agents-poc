@@ -2,7 +2,6 @@
 Database tools: structured queries over climb_logs and chat_messages.
 """
 
-import json
 from db.schema import get_connection
 from tools.registry import registry, ToolResult
 
